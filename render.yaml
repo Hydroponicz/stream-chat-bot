@@ -1,0 +1,24 @@
+# render.yaml — Render Auto-Deploy
+# Connect this repo at: https://render.com → New → Blueprint → point at render.yaml
+
+services:
+  - type: web
+    name: stream-chat-bot
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    envVars:
+      - key: TWITCH_TOKEN
+        sync: false
+      - key: TWITCH_BOT_USERNAME
+        sync: false
+      - key: TWITCH_CHANNEL
+        sync: false
+      - key: KICK_CHANNEL
+        sync: false
+      - key: ADMIN_PASSWORD
+        sync: false
+      - key: HOST
+        value: "0.0.0.0"
+      - key: PORT
+        value: "8000"
