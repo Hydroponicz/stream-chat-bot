@@ -6,25 +6,22 @@ App\\Events\\ChatMessageEvent, parses messages, and publishes to the EventBus.
 import asyncio
 import json
 import logging
-import random
 
 import websockets
-from websockets.client import connect
 
 log = logging.getLogger("kick")
 
+from state import bus, add_message
+
 
 class KickBot:
-    PUSHER_HOST = "ws-us2.pusher.com"
-    PUSHER_PORT = 443
+    HOST = "ws-us2.pusher.com"
+    PORT = 443
 
-    def __init__(self, channel: str, chatroom_id: int | str | None, bus, *,
-                 host: str = PUSHER_HOST, port: int = PUSHER_PORT):
+    def __init__(self, channel: str, chatroom_id: str | int | None, bus):
         self.channel = channel
         self.chatroom_id = chatroom_id or channel
         self.bus = bus
-        self.host = host
-        self.port = port
         self._running = False
         self._ws = None
 
@@ -34,34 +31,30 @@ class KickBot:
             try:
                 await self._connect()
             except Exception as e:
-                log.warning("Kick WebSocket disconnected: %s. Reconnecting in 5s…", e)
+                log.warning("Kick WebSocket error: %s. Reconnecting in 5s…", e)
                 await asyncio.sleep(5)
 
     async def _connect(self):
-        import os
-        from app import add_message
-
-        uri = f"wss://{self.host}:{self.port}/app/{self.chatroom_id}"
+        uri = f"wss://{self.HOST}:{self.PORT}/app/{self.chatroom_id}"
         log.info("Connecting to Kick WebSocket: %s", uri)
 
-        async with connect(uri, ping_interval=None) as ws:
+        async with websockets.connect(uri, ping_interval=None) as ws:
             self._ws = ws
-            # Subscribe to chat events
-            subscribe_payload = {
+            # Subscribe to Kick chat events
+            await ws.send(json.dumps({
                 "event": "pusher:subscribe",
                 "data": {
                     "auth": "",
                     "channel": f"private-app.{self.chatroom_id}",
                 },
-            }
-            await ws.send(json.dumps(subscribe_payload))
+            }))
 
             async for raw in ws:
                 if not self._running:
                     break
-                await self._handle_message(raw, add_message)
+                await self._handle(raw)
 
-    async def _handle_message(self, raw: str, add_message):
+    async def _handle(self, raw: str):
         try:
             msg = json.loads(raw)
         except Exception:
@@ -80,13 +73,12 @@ class KickBot:
             sender = data.get("sender", {})
             username = sender.get("username", "unknown")
             content = data.get("content", "")
-            message_id = data.get("id", "")
 
             entry = add_message("kick", username, content, data)
             await self.bus.publish({**entry, "type": "chat_message"})
 
         elif event == "pusher:pong":
-            pass  # keepalive response, ignore
+            pass  # keepalive
 
     async def close(self):
         self._running = False

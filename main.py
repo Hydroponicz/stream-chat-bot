@@ -13,6 +13,8 @@ load_dotenv()
 import app as fastapi_app
 from services.kick import KickService
 from services.twitch import TwitchService
+import state as global_state
+from state import add_message, leaderboard, trivia, bus, broadcast
 
 logging.basicConfig(
     level=logging.INFO,
@@ -22,42 +24,38 @@ logger = logging.getLogger("main")
 
 
 async def on_chat_message(msg):
-    """Shared handler for messages from both platforms."""
     logger.info(f"[{msg.platform}] {msg.username}: {msg.content}")
-    fastapi_app.record_message(msg)
-    await fastapi_app.broadcast(
-        {
-            "type": "chat",
-            "platform": msg.platform,
-            "username": msg.username,
-            "content": msg.content,
-            "timestamp": msg.timestamp,
-        }
-    )
 
-    # Trivia logic
-    if fastapi_app.state["trivia"]["active"]:
-        if (
-            fastapi_app.state["trivia"]["answer"]
-            and msg.content.lower().strip() == fastapi_app.state["trivia"]["answer"]
-        ):
-            current = fastapi_app.state["leaderboard"].get(msg.username, 0)
-            fastapi_app.state["leaderboard"][msg.username] = current + 10
-            fastapi_app.state["trivia"]["active"] = False
-            await fastapi_app.broadcast(
-                {
-                    "type": "trivia_win",
-                    "username": msg.username,
-                    "answer": fastapi_app.state["trivia"]["answer"],
-                }
-            )
+    # Record in ring buffer
+    add_message(platform=msg.platform, username=msg.username, text=msg.content)
+
+    # Award participation points
+    leaderboard[msg.username] = leaderboard.get(msg.username, 0) + 1
+
+    # Broadcast to SSE clients
+    await broadcast({
+        "type": "chat",
+        "platform": msg.platform,
+        "username": msg.username,
+        "content": msg.content,
+        "timestamp": msg.timestamp,
+    })
+
+    # Trivia check
+    if trivia.active:
+        result = await trivia.check_answer(msg.username, msg.content)
+        if result is True:
+            await broadcast({
+                "type": "trivia_win",
+                "username": msg.username,
+                "answer": trivia.answer,
+            })
 
 
 def main():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
-    # Initialize services
     kick_service = None
     twitch_service = None
 
@@ -66,7 +64,6 @@ def main():
             channel_name=os.getenv("KICK_CHANNEL"),
             event_callback=on_chat_message,
         )
-        fastapi_app.state["connected"]["kick"] = True
         kick_service.start(loop)
         logger.info("[Main] Kick service started")
     else:
@@ -79,15 +76,13 @@ def main():
             channel=os.getenv("TWITCH_CHANNEL"),
             event_callback=on_chat_message,
         )
-        fastapi_app.state["connected"]["twitch"] = True
         twitch_service.start(loop)
         logger.info("[Main] Twitch service started")
     else:
         logger.warning("[Main] Twitch credentials not set — skipping Twitch")
 
-    # Graceful shutdown
     def shutdown(signum, frame):
-        logger.info("[Main] Shutdown signal received")
+        logger.info("[Main] Shutdown received")
         if kick_service:
             kick_service.stop()
         if twitch_service:
@@ -97,7 +92,6 @@ def main():
     signal.signal(signal.SIGINT, shutdown)
     signal.signal(signal.SIGTERM, shutdown)
 
-    # Import uvicorn here so it doesn't conflict with the signal handlers above
     import uvicorn
     uvicorn.run(
         fastapi_app.app,
