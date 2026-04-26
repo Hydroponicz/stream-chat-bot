@@ -1,4 +1,4 @@
-# Byte-compiled / optimized / generated files
+# Byte-compiled / optimized
 __pycache__/
 *.py[cod]
 *$py.class
@@ -7,7 +7,6 @@ __pycache__/
 venv/
 env/
 .venv/
-ENV/
 
 # Environment variables
 .env
@@ -20,22 +19,15 @@ ENV/
 *.swp
 *.swo
 
-# Logs
-*.log
-logs/
-
 # OS
 .DS_Store
 Thumbs.db
 
-# Database / state
-*.db
-*.sqlite
-*.sqlite3
-state.json
+# Logs
+*.log
+logs/
 
 # Distribution
+dist/
 build/
-dist/
 *.egg-info/
-dist/

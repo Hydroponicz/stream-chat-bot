@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Stream Chat Bot — Dashboard</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+
+<header class="header">
+  <div class="header-title">Stream Chat Bot</div>
+  <div class="header-platforms">
+    <span class="badge" id="kick-status">Kick ●</span>
+    <span class="badge" id="twitch-status">Twitch ●</span>
+  </div>
+  <nav class="header-nav">
+    <a href="/admin" id="nav-admin" style="display:none">Admin</a>
+    <a href="/logout" id="nav-logout" style="display:none">Logout</a>
+  </nav>
+</header>
+
+<main class="dashboard" id="public-dashboard">
+  <section class="chat-panel">
+    <h2>Live Chat</h2>
+    <div class="chat-feed" id="chat-feed"></div>
+  </section>
+  <aside class="leaderboard-panel">
+    <h2>Leaderboard</h2>
+    <div class="leaderboard-list" id="leaderboard-list">
+      <p class="empty-state">No messages yet.</p>
+    </div>
+  </aside>
+</main>
+
+<div class="admin-panel" id="admin-panel" style="display:none">
+  <div class="admin-grid">
+    <section class="chat-panel">
+      <h2>Live Chat</h2>
+      <div class="chat-feed" id="chat-feed-admin"></div>
+    </section>
+    <aside class="admin-sidebar">
+      <div class="leaderboard-panel">
+        <h2>Leaderboard</h2>
+        <div class="leaderboard-list" id="leaderboard-list-admin"></div>
+      </div>
+      <div class="trivia-panel">
+        <h2>Trivia</h2>
+        <div id="trivia-status" class="trivia-status">Inactive</div>
+        <div id="trivia-question" class="trivia-question"></div>
+        <div class="trivia-controls">
+          <button class="btn btn-primary" onclick="startTrivia()">Start Trivia</button>
+          <button class="btn btn-danger" onclick="stopTrivia()">Stop Trivia</button>
+        </div>
+      </div>
+      <div class="admin-controls">
+        <h2>Controls</h2>
+        <button class="btn btn-warning" onclick="resetGame()">Reset Game</button>
+        <div class="give-points">
+          <input type="text" id="points-user" placeholder="Username" />
+          <input type="number" id="points-amount" placeholder="Points" min="1" />
+          <button class="btn btn-success" onclick="givePoints()">Give Points</button>
+        </div>
+      </div>
+    </aside>
+  </div>
+</div>
+
+<script src="/static/js/app.js"></script>
+<script>
+  // Auto-detect admin view
+  const isAdmin = document.getElementById('nav-admin').style.display !== 'none' || window.location.pathname === '/admin';
+  if (isAdmin) {
+    document.getElementById('public-dashboard').style.display = 'none';
+    document.getElementById('admin-panel').style.display = 'block';
+  }
+</script>
+</body>
+</html>
