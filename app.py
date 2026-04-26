@@ -1,146 +1,151 @@
-import asyncio
+"""
+Stream Chat Bot — FastAPI web dashboard, SSE push, and admin API.
+Serves the single-page dashboard and exposes REST + SSE endpoints.
+"""
+
 import json
-import logging
 import os
-from datetime import datetime
-from typing import Optional
+from pathlib import Path
 
-from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import HTMLResponse, RedirectResponse
-from fastapi.staticfiles import StaticFiles
-from fastapi.templating import Jinja2Templates
-from sse_starlette import EventSourceResponse
-from starlette.middleware.sessions import SessionMiddleware
 from dotenv import load_dotenv
-
-import state as global_state
-from state import bus, add_message, leaderboard, trivia, get_leaderboard
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
+from sse_starlette.sse import EventSourceResponse as EventStreamResponse
 
 load_dotenv()
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("app")
-
 app = FastAPI()
-app.add_middleware(SessionMiddleware, secret_key=os.getenv("SESSION_SECRET", "change-me-in-prod"))
 
-# --- Mounts ---
-app.mount("/static", StaticFiles(directory="static"), name="static")
-templates = Jinja2Templates(directory="templates")
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "changeme")
+HOST = os.getenv("HOST", "0.0.0.0")
+PORT = int(os.getenv("PORT", "8000"))
 
-# --- SSE broadcast ---
-sse_connections: list[asyncio.Queue] = []
+TEMPLATES = Path(__file__).parent / "templates"
+STATIC = Path(__file__).parent / "static"
 
+from state import (
+    bus, trivia, add_message, get_recent_messages,
+    get_leaderboard, award_points, reset_leaderboard, leaderboard,
+)
 
-async def sse_event_generator():
-    queue: asyncio.Queue = asyncio.Queue()
-    sse_connections.append(queue)
-    try:
-        while True:
-            data = await queue.get()
-            yield {"event": "update", "data": json.dumps(data)}
-    finally:
-        sse_connections.remove(queue)
+security = HTTPBasic()
 
 
-async def broadcast(data: dict):
-    for q in sse_connections[:]:
+def verify_admin(credentials: HTTPBasicCredentials):
+    if credentials.username != "admin" or credentials.password != ADMIN_PASSWORD:
+        raise HTTPException(
+            status_code=401,
+            detail="Incorrect credentials",
+            headers={"WWW-Authenticate": "Basic"},
+        )
+
+
+# ── SSE Endpoint ────────────────────────────────────────────────────────────
+
+@app.get("/events")
+async def events():
+    async def gen():
+        q = bus.subscribe()
         try:
-            q.put_nowait(data)
+            while True:
+                msg = await q.get()
+                yield {"event": msg.get("type", "message"), "data": json.dumps(msg)}
         except Exception:
-            sse_connections.remove(q)
+            bus.unsubscribe(q)
+
+    return EventStreamResponse(gen(), media_type="text/event-stream")
 
 
-# --- Routes ---
-@app.get("/", response_class=HTMLResponse)
-async def root(request: Request):
-    return templates.TemplateResponse("dashboard.html", {"request": request})
+# ── Page Routes ─────────────────────────────────────────────────────────────
+
+@app.get("/")
+async def root():
+    return FileResponse(str(TEMPLATES / "dashboard.html"))
 
 
 @app.get("/admin")
-async def admin_page(request: Request):
-    if request.session.get("admin_authenticated") != os.getenv("ADMIN_PASSWORD"):
-        return RedirectResponse(url="/login", status_code=302)
-    return templates.TemplateResponse("dashboard.html", {"request": request, "admin": True})
+async def admin_page():
+    return FileResponse(str(TEMPLATES / "dashboard.html"))
 
 
-@app.get("/login", response_class=HTMLResponse)
-async def login_page(request: Request):
-    return templates.TemplateResponse("login.html", {"request": request})
+# ── REST API ────────────────────────────────────────────────────────────────
+
+@app.get("/api/messages")
+async def get_messages(n: int = 50):
+    return JSONResponse(get_recent_messages(n))
 
 
-@app.post("/login")
-async def login_submit(request: Request):
-    form = await request.form()
-    entered = form.get("password", "")
-    if entered == os.getenv("ADMIN_PASSWORD"):
-        request.session["admin_authenticated"] = entered
-        return RedirectResponse(url="/admin", status_code=302)
-    return templates.TemplateResponse("login.html", {"request": request, "error": "Invalid password"})
+@app.get("/api/leaderboard")
+async def get_leaderboard_api():
+    return JSONResponse(get_leaderboard())
 
 
-@app.get("/logout")
-async def logout(request: Request):
-    request.session.clear()
-    return RedirectResponse(url="/", status_code=302)
+@app.get("/api/trivia")
+async def get_trivia():
+    return JSONResponse(trivia.get_state())
 
 
-# --- SSE stream ---
-@app.get("/events")
-async def events(request: Request):
-    return EventSourceResponse(sse_event_generator())
+@app.post("/api/trivia/start")
+async def start_trivia_api(
+    request: Request,
+    credentials: HTTPBasicCredentials = security,
+):
+    verify_admin(credentials)
+    body = await request.json()
+    await trivia.start_trivia(
+        question=body.get("question", "?"),
+        answer=body.get("answer", "?"),
+        hint=body.get("hint", ""),
+    )
+    return JSONResponse({"ok": True})
 
 
-# --- REST control (admin only) ---
-def require_admin(request: Request):
-    if request.session.get("admin_authenticated") != os.getenv("ADMIN_PASSWORD"):
-        raise HTTPException(status_code=401, detail="Unauthorized")
-
-
-@app.post("/admin/trivia/start")
-async def trivia_start(request: Request, question: str = "", answer: str = ""):
-    require_admin(request)
-    hint = f"The answer starts with '{answer[0].upper()}'" if answer else ""
-    await trivia.start_trivia(question=question, answer=answer, hint=hint)
-    return {"status": "ok", "question": question}
-
-
-@app.post("/admin/trivia/stop")
-async def trivia_stop(request: Request):
-    require_admin(request)
+@app.post("/api/trivia/stop")
+async def stop_trivia_api(credentials: HTTPBasicCredentials = security):
+    verify_admin(credentials)
     await trivia.stop_trivia()
-    return {"status": "ok"}
+    return JSONResponse({"ok": True})
 
 
-@app.post("/admin/reset")
-async def reset_game(request: Request):
-    require_admin(request)
-    global_state._messages.clear()
-    leaderboard.clear()
-    trivia.active = False
-    trivia.question = ""
-    trivia.answer = ""
-    trivia.participants.clear()
-    await broadcast({"type": "reset"})
-    return {"status": "ok"}
+@app.post("/api/points")
+async def points_api(
+    request: Request,
+    credentials: HTTPBasicCredentials = security,
+):
+    verify_admin(credentials)
+    body = await request.json()
+    user = body.get("username", "")
+    pts = int(body.get("points", 0))
+    if not user:
+        return JSONResponse({"error": "username required"}, status_code=400)
+    award_points(user, pts)
+    return JSONResponse({"ok": True, "username": user, "points": leaderboard[user]})
 
 
-@app.post("/admin/points")
-async def give_points(request: Request, username: str = "", points: int = 0):
-    require_admin(request)
-    if not username:
-        raise HTTPException(status_code=400, detail="username required")
-    leaderboard[username] = leaderboard.get(username, 0) + points
-    await broadcast({"type": "points_update", "username": username, "points": leaderboard[username]})
-    return {"status": "ok", "username": username, "points": leaderboard[username]}
+@app.post("/api/leaderboard/reset")
+async def reset_leaderboard_api(credentials: HTTPBasicCredentials = security):
+    verify_admin(credentials)
+    reset_leaderboard()
+    return JSONResponse({"ok": True})
 
 
-@app.get("/admin/state")
-async def get_state(request: Request):
-    require_admin(request)
-    return {
-        "messages": global_state._messages[-50:],
-        "leaderboard": dict(get_leaderboard()),
-        "trivia": trivia.get_state(),
-        "connected": {"kick": False, "twitch": False},
-    }
+@app.get("/api/status")
+async def status_api():
+    return JSONResponse({
+        "connected": True,
+        "kick_channel": os.getenv("KICK_CHANNEL", ""),
+        "twitch_channel": os.getenv("TWITCH_CHANNEL", ""),
+    })
+
+
+@app.get("/static/{path:path}")
+async def static_files(path: str):
+    file_path = STATIC / path
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="Not found")
+    return FileResponse(file_path)
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("app:app", host=HOST, port=PORT, reload=False)

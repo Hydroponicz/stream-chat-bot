@@ -5,16 +5,13 @@ import os
 import signal
 import sys
 
-import dotenv
 from dotenv import load_dotenv
 
 load_dotenv()
 
 import app as fastapi_app
-from services.kick import KickService
-from services.twitch import TwitchService
 import state as global_state
-from state import add_message, leaderboard, trivia, bus, broadcast
+from state import add_message, leaderboard, trivia, bus
 
 logging.basicConfig(
     level=logging.INFO,
@@ -25,31 +22,19 @@ logger = logging.getLogger("main")
 
 async def on_chat_message(msg):
     logger.info(f"[{msg.platform}] {msg.username}: {msg.content}")
-
-    # Record in ring buffer
     add_message(platform=msg.platform, username=msg.username, text=msg.content)
-
-    # Award participation points
     leaderboard[msg.username] = leaderboard.get(msg.username, 0) + 1
-
-    # Broadcast to SSE clients
-    await broadcast({
+    await bus.publish({
         "type": "chat",
         "platform": msg.platform,
         "username": msg.username,
         "content": msg.content,
         "timestamp": msg.timestamp,
     })
-
-    # Trivia check
     if trivia.active:
         result = await trivia.check_answer(msg.username, msg.content)
         if result is True:
-            await broadcast({
-                "type": "trivia_win",
-                "username": msg.username,
-                "answer": trivia.answer,
-            })
+            await bus.publish({"type": "trivia_win", "username": msg.username, "answer": trivia.answer})
 
 
 def main():
@@ -57,36 +42,21 @@ def main():
     asyncio.set_event_loop(loop)
 
     kick_service = None
-    twitch_service = None
 
     if os.getenv("KICK_CHANNEL"):
-        kick_service = KickService(
-            channel_name=os.getenv("KICK_CHANNEL"),
-            event_callback=on_chat_message,
+        from services.kick import KickBot
+        kick_service = KickBot(
+            channel=os.getenv("KICK_CHANNEL"),
+            chatroom_id=os.getenv("KICK_CHATROOM_ID"),
+            bus=bus,
         )
-        kick_service.start(loop)
+        loop.create_task(kick_service.run())
         logger.info("[Main] Kick service started")
-    else:
-        logger.warning("[Main] KICK_CHANNEL not set — skipping Kick")
-
-    if os.getenv("TWITCH_TOKEN") and os.getenv("TWITCH_BOT_USERNAME") and os.getenv("TWITCH_CHANNEL"):
-        twitch_service = TwitchService(
-            token=os.getenv("TWITCH_TOKEN"),
-            nickname=os.getenv("TWITCH_BOT_USERNAME"),
-            channel=os.getenv("TWITCH_CHANNEL"),
-            event_callback=on_chat_message,
-        )
-        twitch_service.start(loop)
-        logger.info("[Main] Twitch service started")
-    else:
-        logger.warning("[Main] Twitch credentials not set — skipping Twitch")
 
     def shutdown(signum, frame):
         logger.info("[Main] Shutdown received")
         if kick_service:
-            kick_service.stop()
-        if twitch_service:
-            twitch_service.stop()
+            loop.create_task(kick_service.close())
         sys.exit(0)
 
     signal.signal(signal.SIGINT, shutdown)
@@ -96,8 +66,7 @@ def main():
     uvicorn.run(
         fastapi_app.app,
         host=os.getenv("HOST", "0.0.0.0"),
-        port=int(os.getenv("PORT", 8000)),
-        loop=loop,
+        port=int(os.getenv("PORT", 8080)),
         log_level="info",
     )
 
